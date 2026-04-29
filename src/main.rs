@@ -1,95 +1,74 @@
-use anyhow::{Context, Result, anyhow};
-use clap::Parser;
-use std::fs::File;
-use std::io::copy;
-use std::path::PathBuf;
-use url::Url;
+use std::env;
+use std::path::Path;
+use std::process::Command;
 
-#[derive(Parser)]
-#[command(
-    version,
-    about,
-    long_about = None,
-    after_help = "Example:\n  babyicon \"https://hugeicons.com/icon/github?style=stroke-rounded\" -o icons/github.svg"
-)]
-struct Args {
-    /// Icon URL from hugeicons.com  
-    url: String,
-    /// The output file path
-    #[arg(short, long)]
-    output: Option<PathBuf>,
-}
+fn main() {
+    let mut args = env::args();
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let cdn_url = build_url(&args.url)?;
-    println!("CDN URL: {}", cdn_url);
+    let prog = args.next().unwrap();
+    let input = match args.next() {
+        Some(v) => v,
+        None => {
+            eprintln!("Usage: {} <url> [output]", prog);
+            return;
+        }
+    };
 
-    let filename = cdn_url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .ok_or_else(|| anyhow!("Could not determine the filename from the URL"))?;
+    let output = args.next();
 
-    let output_path = args.output.unwrap_or_else(|| PathBuf::from(filename));
+    let cdn_url = match build_url(&input) {
+        Some(u) => u,
+        None => {
+            eprintln!("Invalid URL");
+            return;
+        }
+    };
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).context("Failed to create ouput directory")?;
+    let filename = cdn_url.rsplit('/').next().unwrap();
+    let output_path = output.unwrap_or_else(|| filename.to_string());
+
+    if let Some(parent) = Path::new(&output_path).parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("-o")
+        .arg(&output_path)
+        .arg(&cdn_url)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("Saved to {}", output_path);
+        }
+        _ => {
+            eprintln!("Download failed");
         }
     }
-
-    download_file(&cdn_url, &output_path)?;
-
-    println!("File saved to: {}", output_path.display());
-
-    Ok(())
 }
 
-fn build_url(input_url: &str) -> Result<Url> {
-    let url = Url::parse(input_url).context("Failed to parse the URL")?;
-
-    if url.host_str() != Some("hugeicons.com") {
-        return Err(anyhow!("The URL must be from hugeicons.com"));
+fn build_url(input: &str) -> Option<String> {
+    if !input.starts_with("https://hugeicons.com/icon/") {
+        return None;
     }
 
-    let segments: Vec<_> = url
-        .path_segments()
-        .ok_or_else(|| anyhow!("Invalid Path"))?
-        .collect();
+    let (path, query) = input.split_once('?')?;
 
-    if segments.len() < 2 || segments[0] != "icon" {
-        return Err(anyhow!(
-            "URL path must start with /icon/ and contain at least one more segment"
-        ));
-    }
+    let icon = path
+        .trim_start_matches("https://hugeicons.com/icon/")
+        .split('/')
+        .next()?;
 
-    let icon_name = segments[1];
-    let style = url
-        .query_pairs()
-        .find(|(k, _)| k == "style")
-        .map(|(_, v)| v)
-        .ok_or_else(|| anyhow!("Missing 'style' query parameter in the URL"))?;
+    let style = query
+        .split('&')
+        .find_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            if k == "style" { Some(v) } else { None }
+        })?;
 
-    let cdn_url = format!(
+    Some(format!(
         "https://cdn.hugeicons.com/icons/{}-{}.svg",
-        icon_name, style
-    );
-    Url::parse(&cdn_url).context("Failed to construct the CDN URL")
-}
-
-fn download_file(url: &Url, output_path: &PathBuf) -> Result<()> {
-    let response = reqwest::blocking::get(url.as_str()).context("Failed to send request")?;
-
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "Failed to download the file: HTTP {}",
-            response.status()
-        ));
-    }
-
-    let mut file = File::create(output_path).context("Failed to create file")?;
-    let mut content = response;
-    copy(&mut content, &mut file).context("Failed to save content to file")?;
-
-    Ok(())
+        icon, style
+    ))
 }
